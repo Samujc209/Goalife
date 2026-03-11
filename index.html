@@ -1,5 +1,22 @@
 <!DOCTYPE html>
-<html lang="es">
+<html 
+
+// ===== PER-USER LOCAL STORAGE =====
+function lsKey(key) {
+  return currentUser ? 'goalife_' + currentUser.uid + '_' + key : 'goalife_' + key;
+}
+function lsGet(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(lsKey(key))) ?? fallback; } catch { return fallback; }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem(lsKey(key), JSON.stringify(val)); } catch {}
+}
+function lsClear() {
+  // Only clear in-memory, not localStorage (so offline cache stays)
+  goals = []; cumplidos = []; notes = [];
+  habitData = { habits: ['','','','',''], log: {} };
+}
+lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -729,11 +746,11 @@
   .note-delete:hover { background: var(--red-bg); color: var(--red); }
 
   /* CONFETTI CANVAS */
-  #confetti-canvas { z-index: 99999 !important; pointer-events:none;
+  #confetti-canvas {
     position: fixed;
     inset: 0;
     pointer-events: none;
-    z-index: 9999;
+    z-index: 99999;
     display: none;
   }
 
@@ -1450,7 +1467,7 @@
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn btn-ghost btn-sm" onclick="changeHabitMonth(-1)">← Prev</button>
-        <span id="habit-month-display" style="font-family:'Syne',sans-serif;font-weight:700;font-size:0.95rem;color:var(--text);min-width:120px;text-align:center;cursor:pointer" onclick="openMonthPicker()"></span>
+        <button id="habit-month-display" onclick="openMonthPicker()" style="font-family:'Syne',sans-serif;font-weight:700;font-size:0.9rem;color:var(--text);min-width:120px;text-align:center;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:6px 12px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"></button>
         <button class="btn btn-ghost btn-sm" onclick="changeHabitMonth(1)">Next →</button>
         <button class="btn btn-primary btn-sm" onclick="habitGoToToday()">Today</button>
       </div>
@@ -1777,9 +1794,9 @@
 
 <script>
 // ========== STATE ==========
-let goals = JSON.parse(localStorage.getItem('goalife_goals') || '[]');
-let cumplidos = JSON.parse(localStorage.getItem('goalife_cumplidos') || '[]');
-let notes = JSON.parse(localStorage.getItem('goalife_notes') || '[]');
+let goals = [];
+let cumplidos = [];
+let notes = [];
 let GEMINI_KEY = localStorage.getItem('goalife_gemini_key') || '';
 let currentGoalId = null;
 let selectedIcon = '🎯';
@@ -1808,6 +1825,8 @@ function signInWithGoogle() {
 
 function signOut() {
   if (confirm('Sign out?')) {
+    lsClear();
+    currentUser = null;
     auth.signOut();
   }
 }
@@ -1828,9 +1847,9 @@ function setSyncStatus(status) {
 
 // ========== SAVE (local + cloud) ==========
 function save() {
-  localStorage.setItem('goalife_goals', JSON.stringify(goals));
-  localStorage.setItem('goalife_cumplidos', JSON.stringify(cumplidos));
-  localStorage.setItem('goalife_notes', JSON.stringify(notes));
+  lsSet('goals', goals);
+  lsSet('cumplidos', cumplidos);
+  lsSet('notes', notes);
   syncToCloud();
 }
 
@@ -1857,9 +1876,9 @@ async function loadFromCloud(uid) {
     const doc = await db.collection('users').doc(uid).get();
     if (doc.exists) {
       const data = doc.data();
-      if (data.goals) { goals = data.goals; localStorage.setItem('goalife_goals', JSON.stringify(goals)); }
-      if (data.cumplidos) { cumplidos = data.cumplidos; localStorage.setItem('goalife_cumplidos', JSON.stringify(cumplidos)); }
-      if (data.notes) { notes = data.notes; localStorage.setItem('goalife_notes', JSON.stringify(notes)); }
+      if (data.goals) { goals = data.goals; lsSet('goals', goals); }
+      if (data.cumplidos) { cumplidos = data.cumplidos; lsSet('cumplidos', cumplidos); }
+      if (data.notes) { notes = data.notes; lsSet('notes', notes); }
     }
     setSyncStatus('synced');
     renderGoals(); renderNotes(); renderCumplidos();
@@ -1887,17 +1906,24 @@ auth.onAuthStateChanged(async user => {
     if (loginScreen) loginScreen.style.display = 'none';
     if (avatar) { avatar.src = user.photoURL || ''; avatar.style.display = 'block'; }
     if (logoutBtn) logoutBtn.style.display = 'block';
+    // Load local cache first (instant), then cloud overwrites
+    goals = lsGet('goals', []);
+    cumplidos = lsGet('cumplidos', []);
+    notes = lsGet('notes', []);
+    habitData = lsGet('habits', { habits: ['','','','',''], log: {} });
+    renderGoals(); renderNotes(); renderCumplidos(); renderHabitTracker();
     await loadFromCloud(user.uid);
     try {
       const doc = await db.collection('users').doc(user.uid).get();
       if (doc.exists && doc.data().habitData) {
         habitData = doc.data().habitData;
-        localStorage.setItem('goalife_habits', JSON.stringify(habitData));
+        lsSet('habits', habitData);
       }
     } catch(e) {}
     showToast('👋 Welcome, ' + user.displayName.split(' ')[0] + '!');
     init();
   } else {
+    lsClear();
     currentUser = null;
     if (loginScreen) loginScreen.style.display = 'flex';
     if (avatar) avatar.style.display = 'none';
@@ -2381,7 +2407,7 @@ function doneGoal() {
   saveDetailSteps();
   save();
   closeModal('modal-goal-detail');
-  launchConfetti();
+  setTimeout(() => launchConfetti(), 100);
   showToast('🏆 Goal achieved! Incredible work.', 'success');
   renderGoals();
   renderByPeriod();
@@ -3098,7 +3124,7 @@ function init() {
 }
 
 // ========== HABITS ==========
-let habitData = JSON.parse(localStorage.getItem('goalife_habits') || 'null') || {
+let habitData = {
   habits: ['','','','',''],
   log: {}
 };
@@ -3106,7 +3132,7 @@ let habitYear = new Date().getFullYear();
 let habitMonth = new Date().getMonth(); // 0-indexed
 
 function saveHabits() {
-  localStorage.setItem('goalife_habits', JSON.stringify(habitData));
+  lsSet('habits', habitData);
   syncHabitsToCloud();
   renderDaySummary();
 }
