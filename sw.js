@@ -1,4 +1,10 @@
-const CACHE = 'goalife-v3';
+// ===== Goalife service worker (PWA + OneSignal push, unified) =====
+// IMPORTANT: this single file handles BOTH offline caching and push
+// notifications. The line below pulls in OneSignal's push handlers so the
+// PWA service worker and OneSignal don't fight over the same scope.
+importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
+
+const CACHE = 'goalife-v4';
 
 self.addEventListener('install', e => {
   self.skipWaiting();
@@ -18,7 +24,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   e.respondWith(
-    caches.match(e.request).then(cached => 
+    caches.match(e.request).then(cached =>
       cached || fetch(e.request).then(res => {
         if (res.ok) {
           const clone = res.clone();
