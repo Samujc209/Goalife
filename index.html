@@ -1526,6 +1526,7 @@
         <button id="habit-month-display" onclick="openMonthPicker()" style="font-family:'Syne',sans-serif;font-weight:700;font-size:0.9rem;color:var(--text);min-width:120px;text-align:center;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:6px 12px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"></button>
         <button class="btn btn-ghost btn-sm" onclick="changeHabitMonth(1)">Next →</button>
         <button class="btn btn-primary btn-sm" onclick="habitGoToToday()">Today</button>
+        <button class="btn btn-ghost btn-sm" onclick="openHabitReminders()" title="Reminders" style="padding:6px 10px"><svg class="ico" width="16" height="16" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></button>
       </div>
     </div>
 
@@ -1536,12 +1537,9 @@
         <tbody id="habit-tbody"></tbody>
       </table>
     </div>
-    <div style="margin-top:8px;padding:0 4px;display:flex;gap:8px">
-      <button class="btn btn-ghost btn-sm" onclick="addHabitSlot()" style="flex:1;border:1px dashed var(--border2);border-radius:8px;padding:8px;color:var(--text3)">
-        + Add habit
-      </button>
-      <button class="btn btn-ghost btn-sm" onclick="openTemplatesModal()" style="flex:1;border:1px dashed var(--border2);border-radius:8px;padding:8px;color:var(--text3)">
-        <svg class="ico" width="15" height="15" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg> Plantillas
+    <div style="margin-top:8px;padding:0 4px">
+      <button class="btn btn-ghost btn-sm" onclick="openTemplatesModal()" style="width:100%;border:1px dashed var(--border2);border-radius:8px;padding:8px;color:var(--text3)">
+        <svg class="ico" width="15" height="15" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg> New habits
       </button>
     </div>
 
@@ -1836,11 +1834,11 @@
 <div class="modal-overlay" id="templates-modal">
   <div class="modal">
     <div class="modal-header">
-      <div class="modal-title"><svg class="ico" width="18" height="18" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg> Plantillas</div>
+      <div class="modal-title"><svg class="ico" width="18" height="18" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg> New habits</div>
       <button class="modal-close" onclick="closeModal('templates-modal')">✕</button>
     </div>
     <div class="modal-body">
-      <p style="font-size:0.8rem;color:var(--text3);margin-bottom:14px">Toca una plantilla; los hábitos seleccionados serán añadidos a tu seguimiento de hábitos del mes actual.</p>
+      <p style="font-size:0.8rem;color:var(--text3);margin-bottom:14px">Elige una plantilla y los hábitos seleccionados se añadirán a tu seguimiento del mes actual. (También puedes escribir uno propio en la fila vacía del tracker.)</p>
       <div id="templates-list"></div>
     </div>
   </div>
@@ -1856,6 +1854,7 @@
     <div class="modal-body" id="habit-reminder-body"></div>
     <div style="padding:0 20px 20px;">
       <button class="btn btn-primary" style="width:100%" onclick="saveHabitReminders()">Save reminders</button>
+      <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="sendTestNotification()">Send a test notification</button>
     </div>
   </div>
 </div>
@@ -4180,8 +4179,23 @@ async function scheduleHabitRemindersOneSignal() {
   }
 }
 
-async function requestOneSignalPermission() {
-  if (!window._oneSignalReady) {
+async function sendTestNotification() {
+  if (!window._oneSignalReady) { showToast('Push not ready yet — try again in a moment'); return; }
+  let playerId = null;
+  try { playerId = await OneSignal.User.PushSubscription.id; } catch(e) {}
+  if (!playerId) { showToast('First tap "Enable notifications" and allow them'); return; }
+  try {
+    const when = new Date(Date.now() + 8000);
+    const res = await fetch(PUSH_WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playerId: playerId, title: 'Goalife', body: 'Test notification — it works! 🎉', sendAfter: when.toISOString() })
+    });
+    showToast(res.ok ? 'Test sent — it should arrive in ~10s' : 'Could not send (error ' + res.status + ')');
+  } catch(e) { showToast('Network error sending the test'); }
+}
+
+async function requestOneSignalPermission() {  if (!window._oneSignalReady) {
     showToast('⏳ Push not ready yet, try again in a moment');
     return false;
   }
