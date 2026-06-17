@@ -174,6 +174,19 @@
   }
   .tab svg { width: 20px; height: 20px; stroke: currentColor; fill: none; }
   .ico { display:inline-block; vertical-align:-0.18em; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  .tpl-card{background:var(--bg3);border:1px solid var(--border);border-radius:10px;margin-bottom:9px;overflow:hidden}
+  .tpl-head{display:flex;justify-content:space-between;align-items:center;padding:12px 13px;cursor:pointer}
+  .tpl-head .tnm{font-size:0.9rem;font-weight:600}
+  .tpl-head .tsub{font-size:0.7rem;color:var(--text3);margin-top:2px}
+  .tpl-card .chev{transition:transform 0.2s;color:var(--text3);flex-shrink:0}
+  .tpl-card.open .chev{transform:rotate(180deg)}
+  .tpl-body{display:none;padding:0 13px 13px}
+  .tpl-card.open .tpl-body{display:block}
+  .tpl-chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px}
+  .tpl-chip{padding:6px 12px;border-radius:20px;border:1px solid var(--border2);background:var(--bg4);color:var(--text2);font-size:0.78rem;cursor:pointer;font-family:inherit;transition:0.15s}
+  .tpl-chip.sel{background:var(--accent);color:#100e0c;border-color:var(--accent);font-weight:600}
+  .tpl-add{width:100%;padding:9px;border:none;border-radius:8px;background:var(--accent);color:#100e0c;font-family:inherit;font-size:0.8rem;font-weight:600;cursor:pointer}
+  .tpl-add:disabled{background:var(--bg4);color:var(--text3)}
   .tab:hover { color: var(--text); background: var(--bg4); }
 
   /* Habits + Goals slightly bigger */
@@ -1523,9 +1536,12 @@
         <tbody id="habit-tbody"></tbody>
       </table>
     </div>
-    <div style="margin-top:8px;padding:0 4px">
-      <button class="btn btn-ghost btn-sm" onclick="addHabitSlot()" style="width:100%;border:1px dashed var(--border2);border-radius:8px;padding:8px;color:var(--text3)">
+    <div style="margin-top:8px;padding:0 4px;display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="addHabitSlot()" style="flex:1;border:1px dashed var(--border2);border-radius:8px;padding:8px;color:var(--text3)">
         + Add habit
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="openTemplatesModal()" style="flex:1;border:1px dashed var(--border2);border-radius:8px;padding:8px;color:var(--text3)">
+        <svg class="ico" width="15" height="15" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg> Plantillas
       </button>
     </div>
 
@@ -1812,6 +1828,20 @@
     <div class="detail-actions">
       <button class="btn btn-ghost" onclick="leaveGoal()">← Leave</button>
       <button class="btn btn-green" onclick="doneGoal()">✓ DONE</button>
+    </div>
+  </div>
+</div>
+
+<!-- TEMPLATES MODAL -->
+<div class="modal-overlay" id="templates-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title"><svg class="ico" width="18" height="18" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg> Plantillas</div>
+      <button class="modal-close" onclick="closeModal('templates-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:0.8rem;color:var(--text3);margin-bottom:14px">Toca una plantilla; los hábitos seleccionados serán añadidos a tu seguimiento de hábitos del mes actual.</p>
+      <div id="templates-list"></div>
     </div>
   </div>
 </div>
@@ -3492,6 +3522,7 @@ function toggleHabitCell(day, habitIdx) {
     window._habitSyncTimer = setTimeout(() => syncAllToCloud(), 800);
   }
   renderHabitTracker();
+  renderDaySummary();
 }
 
 function addHabitSlot() {
@@ -3510,6 +3541,74 @@ function addHabitSlot() {
     const inputs = document.querySelectorAll('.habit-name-input');
     if (inputs.length) inputs[inputs.length - 1].focus();
   }, 80);
+}
+
+// ===== HABIT TEMPLATES (idea 5) =====
+const HABIT_TEMPLATES = {
+  'Rutina de mañana': { sub: 'Empieza bien el día', habits: ['Despertar temprano','Tomar agua','Meditar','Gratitud','Desayuno sano','Planear el día','Estiramiento','Orar'] },
+  'Fitness': { sub: 'Cuerpo y energía', habits: ['Gym','Cardio','Caminar 30 min','Proteína','Dormir 8 h','Sin azúcar','Pesas','Yoga'] },
+  'Estudio y enfoque': { sub: 'Aprende y concéntrate', habits: ['Lectura','Aprender algo nuevo','Sin distracciones','Revisar metas','Práctica deliberada','Apuntes','Tocar instrumento','Estudiar idioma'] }
+};
+let _tplSel = {};
+function openTemplatesModal() {
+  _tplSel = {};
+  renderTemplatesList();
+  document.getElementById('templates-modal').classList.add('open');
+}
+function tplAddLabel(ti) {
+  const n = _tplSel[ti] ? _tplSel[ti].size : 0;
+  return n ? ('Añadir ' + n + ' hábito' + (n > 1 ? 's' : '')) : 'Selecciona al menos uno';
+}
+function renderTemplatesList() {
+  let html = '';
+  Object.keys(HABIT_TEMPLATES).forEach((name, ti) => {
+    const t = HABIT_TEMPLATES[name];
+    if (!_tplSel[ti]) _tplSel[ti] = new Set(t.habits.map((_, i) => i));
+    let chips = '';
+    t.habits.forEach((h, i) => {
+      chips += '<button class="tpl-chip' + (_tplSel[ti].has(i) ? ' sel' : '') + '" onclick="tplChip(' + ti + ',' + i + ',this)">' + escHtml(h) + '</button>';
+    });
+    html += '<div class="tpl-card" id="tplc-' + ti + '">'
+      + '<div class="tpl-head" onclick="tplToggleOpen(' + ti + ')"><div><div class="tnm">' + escHtml(name) + '</div><div class="tsub">' + escHtml(t.sub) + '</div></div>'
+      + '<svg class="ico chev" width="18" height="18" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></div>'
+      + '<div class="tpl-body"><div class="tpl-chips">' + chips + '</div>'
+      + '<button class="tpl-add" id="tpladd-' + ti + '" onclick="tplApply(' + ti + ')">' + tplAddLabel(ti) + '</button></div></div>';
+  });
+  document.getElementById('templates-list').innerHTML = html;
+}
+function tplToggleOpen(ti) { document.getElementById('tplc-' + ti).classList.toggle('open'); }
+function tplChip(ti, i, el) {
+  if (_tplSel[ti].has(i)) _tplSel[ti].delete(i); else _tplSel[ti].add(i);
+  el.classList.toggle('sel');
+  const b = document.getElementById('tpladd-' + ti);
+  b.textContent = tplAddLabel(ti);
+  b.disabled = _tplSel[ti].size === 0;
+}
+function tplApply(ti) {
+  const name = Object.keys(HABIT_TEMPLATES)[ti];
+  const t = HABIT_TEMPLATES[name];
+  const chosen = Array.from(_tplSel[ti]).sort((a, b) => a - b).map(i => t.habits[i]);
+  if (!chosen.length) return;
+  const habits = habitsOf(habitYear, habitMonth);
+  let added = 0;
+  chosen.forEach(hn => {
+    let slot = habits.findIndex(h => !h.trim());
+    if (slot === -1) {
+      if (habits.length >= 20) return;
+      habits.push(''); slot = habits.length - 1;
+    }
+    habits[slot] = hn; added++;
+  });
+  habitData.habits = habits.slice();
+  try {
+    const key = currentUser ? ('goalife_' + currentUser.uid + '_habits') : 'goalife_habits';
+    localStorage.setItem(key, JSON.stringify(habitData));
+  } catch (e) {}
+  if (currentUser && !_isLoading) syncAllToCloud();
+  renderHabitTracker();
+  renderDaySummary();
+  closeModal('templates-modal');
+  showToast(added + ' hábito' + (added > 1 ? 's' : '') + ' añadido' + (added > 1 ? 's' : ''), 'success');
 }
 
 function updateHabitName(idx, value) {
@@ -3783,7 +3882,13 @@ function renderDaySummary() {
   const todayHabits = habitsOf(today.getFullYear(), today.getMonth());
   const activeHabits = todayHabits.filter(h => h.trim());
   const total = activeHabits.length;
-  if (total === 0) return;
+  if (total === 0) {
+    document.getElementById('summary-pct').textContent = '0%';
+    document.getElementById('summary-title').textContent = 'Today: 0 of 0 habits';
+    document.getElementById('summary-sub').textContent = 'Add a habit to begin';
+    document.getElementById('summary-streak').textContent = '';
+    return;
+  }
 
   let done = 0;
   todayHabits.forEach((h, i) => {
