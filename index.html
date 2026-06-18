@@ -44,7 +44,7 @@
 </script>
 
 <!-- Static SVG icon for PWA -->
-<link rel="apple-touch-icon" id="apple-icon-180">
+<link rel="apple-touch-icon" id="apple-icon-180" href="./icon-192.png">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%231a1410'/%3E%3Cdefs%3E%3ClinearGradient id='tg' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23c47a55'/%3E%3Cstop offset='1' stop-color='%23efe9e2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ctext x='256' y='360' font-family='Arial Black,sans-serif' font-weight='900' font-size='300' text-anchor='middle' fill='url(%23tg)'%3EG%3C/text%3E%3C/svg%3E">
 <meta name="msapplication-TileImage" content="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%231a1410'/%3E%3Ctext x='256' y='340' font-family='Arial Black,sans-serif' font-weight='900' font-size='280' text-anchor='middle' fill='%23c47a55'%3EG%3C/text%3E%3C/svg%3E">
 
@@ -2077,13 +2077,35 @@ async function loadAllFromCloud(uid) {
     const doc = await db.collection('users').doc(uid).get();
     if (doc.exists) {
       const d = doc.data();
-      if (d.goals)     { goals = d.goals; }
-      if (d.cumplidos) { cumplidos = d.cumplidos; }
-      if (d.notes)     { notes = d.notes; }
+      if (Array.isArray(d.goals) && (d.goals.length || !goals.length))         { goals = d.goals; }
+      if (Array.isArray(d.cumplidos) && (d.cumplidos.length || !cumplidos.length)) { cumplidos = d.cumplidos; }
+      if (Array.isArray(d.notes) && (d.notes.length || !notes.length))         { notes = d.notes; }
       if (d.activityLog) { activityLog = d.activityLog; }
       if (d.loginLog)    { loginLog = d.loginLog; }
       if (d.habitData) {
-        habitData = d.habitData;
+        const cloud = d.habitData;
+        cloud.log = cloud.log || {};
+        cloud.habitsByMonth = cloud.habitsByMonth || {};
+        if (!Array.isArray(cloud.habits)) cloud.habits = ['','','','',''];
+        // SAFETY NET: merge any local marks/names the cloud doesn't have yet, so a
+        // missed sync (or expired Firebase rules) never erases the user's checkboxes.
+        const localLog = (habitData && habitData.log) || {};
+        Object.keys(localLog).forEach(mk => {
+          cloud.log[mk] = cloud.log[mk] || {};
+          Object.keys(localLog[mk]).forEach(ck => { if (localLog[mk][ck]) cloud.log[mk][ck] = true; });
+        });
+        const localHBM = (habitData && habitData.habitsByMonth) || {};
+        Object.keys(localHBM).forEach(mk => {
+          if (!cloud.habitsByMonth[mk]) { cloud.habitsByMonth[mk] = localHBM[mk]; return; }
+          localHBM[mk].forEach((nm, i) => {
+            const c = cloud.habitsByMonth[mk][i];
+            if (nm && nm.trim() && !(c && c.trim())) cloud.habitsByMonth[mk][i] = nm;
+          });
+        });
+        if (!cloud.habits.some(h => h && h.trim()) && habitData && Array.isArray(habitData.habits)) {
+          cloud.habits = habitData.habits.slice();
+        }
+        habitData = cloud;
         if (!habitData.log) habitData.log = {};
         if (!habitData.habitsByMonth) habitData.habitsByMonth = {};
         while (habitData.habits.length < 5) habitData.habits.push('');
@@ -2205,9 +2227,9 @@ function getDayNum(dateStr) {
 function countdownText(dateStr) {
   const d = getDaysLeft(dateStr);
   if (d === null) return '';
-  if (d < 0) return `${Math.abs(d)}d pasados`;
+  if (d < 0) return `${Math.abs(d)}d ago`;
   if (d === 0) return 'Today!';
-  if (d === 1) return '¡Mañana!';
+  if (d === 1) return 'Tomorrow!';
   return `${d} days`;
 }
 
@@ -2433,14 +2455,14 @@ function renderGoalCard(g, idx) {
         <div class="goal-name">${escHtml(g.name || 'Unnamed goal')}</div>
         <div class="goal-meta">
           <span class="goal-tag ${g.period}">${{daily:'Daily',weekly:'Weekly',monthly:'Monthly'}[g.period]||''}</span>
-          ${status === 'failed' ? '<span class="failed-label">⚠ Fallida</span>' : ''}
+          ${status === 'failed' ? '<span class="failed-label">⚠ Failed</span>' : ''}
           ${ctText ? `<span class="countdown ${ctClass}">${ctText}</span>` : ''}
           ${g.steps && g.steps.length ? `<span class="goal-tag">${g.steps.filter(s=>s.done).length}/${g.steps.length} steps</span>` : ''}
         </div>
       </div>
       <div class="goal-actions" onclick="event.stopPropagation()">
         
-        <button class="btn btn-ghost btn-sm" onclick="deleteGoal('${g.id}')">🗑</button>
+        <button class="btn btn-ghost btn-sm" onclick="deleteGoal('${g.id}')"><svg class="ico" width="15" height="15" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
       </div>
       <span class="drag-handle">⠿</span>
     </div>
@@ -4167,8 +4189,8 @@ async function scheduleHabitRemindersOneSignal() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           playerId: playerId,
-          title: '📊 Goalife — ' + habitName,
-          body: "Don't forget to log your habit today! 💪",
+          title: 'Goalife',
+          body: '¡Recuerda ' + habitName + ' hoy! 💪',
           sendAfter: next.toISOString()
         })
       });
@@ -4180,7 +4202,8 @@ async function scheduleHabitRemindersOneSignal() {
 }
 
 async function sendTestNotification() {
-  if (!window._oneSignalReady) { showToast('Push not ready yet — try again in a moment'); return; }
+  for (let i = 0; i < 12 && !window._oneSignalReady; i++) { await new Promise(r => setTimeout(r, 300)); }
+  if (!window._oneSignalReady) { showToast('Push not ready — reinstall the app, then try again'); return; }
   let playerId = null;
   try { playerId = await OneSignal.User.PushSubscription.id; } catch(e) {}
   if (!playerId) { showToast('First tap "Enable notifications" and allow them'); return; }
@@ -4189,7 +4212,7 @@ async function sendTestNotification() {
     const res = await fetch(PUSH_WORKER_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playerId: playerId, title: 'Goalife', body: 'Test notification — it works! 🎉', sendAfter: when.toISOString() })
+      body: JSON.stringify({ playerId: playerId, title: 'Goalife', body: '¡Recuerda tomar agua hoy! 💪 (prueba)', sendAfter: when.toISOString() })
     });
     showToast(res.ok ? 'Test sent — it should arrive in ~10s' : 'Could not send (error ' + res.status + ')');
   } catch(e) { showToast('Network error sending the test'); }
@@ -4253,41 +4276,10 @@ function generateIcon(size) {
 }
 
 function setupManifest() {
-  const svgIcon = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#1a1410"/><defs><linearGradient id="tg" x1="0.25" y1="0.2" x2="0.8" y2="0.85"><stop offset="0" stop-color="#c47a55"/><stop offset="1" stop-color="#efe9e2"/></linearGradient></defs><text x="256" y="350" font-family="Arial Black,sans-serif" font-weight="900" font-size="300" text-anchor="middle" fill="url(#tg)">G</text></svg>`)}`;
-
-  const pngIcons = [72, 96, 128, 144, 152, 192, 384, 512].map(s => ({
-    src: generateIcon(s),
-    sizes: `${s}x${s}`,
-    type: 'image/png',
-    purpose: s >= 192 ? 'any maskable' : 'any'
-  }));
-
-  const icons = [
-    { src: svgIcon, sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
-    ...pngIcons
-  ];
-
-  const manifest = {
-    name: 'Goalife',
-    short_name: 'Goalife',
-    description: 'Goals, habits and daily notes',
-    start_url: '/Goalife/',
-    scope: '/Goalife/',
-    display: 'standalone',
-    orientation: 'portrait',
-    background_color: '#100e0c',
-    theme_color: '#c47a55',
-    categories: ['productivity', 'lifestyle'],
-    icons
-  };
-
-  const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
-  document.getElementById('pwa-manifest').href = URL.createObjectURL(blob);
-
-  // Apple icon — use canvas PNG for better compatibility
-  const icon192 = generateIcon(192);
+  // Use the STATIC manifest.json + real PNG icons so Android installs a proper app
+  // (WebAPK) with a clean icon — no Chrome badge, no "copy URL" prompt.
   const appleIcon = document.getElementById('apple-icon-180');
-  if (appleIcon) appleIcon.href = icon192;
+  if (appleIcon) appleIcon.href = './icon-192.png';
 }
 
 // ===== SERVICE WORKER (inline as blob) =====
