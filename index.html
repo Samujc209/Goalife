@@ -1859,6 +1859,17 @@
   </div>
 </div>
 
+<!-- MONTHLY REVIEW MODAL -->
+<div class="modal-overlay" id="monthly-review-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title"><svg class="ico" width="18" height="18" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M18.7 8 12 14.7l-3.3-3.3L3 17"/></svg> <span id="mr-title">Monthly Review</span></div>
+      <button class="modal-close" onclick="closeModal('monthly-review-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="monthly-review-body"></div>
+  </div>
+</div>
+
 <!-- TOAST -->
 
 <div class="toast" id="toast"></div>
@@ -2206,6 +2217,34 @@ function getCalStatus(dateStr) {
   return 'ok';
 }
 
+// Colored time-remaining bar for a goal's deadline: green (plenty of time) ->
+// amber (getting close) -> red (very close / overdue). Needs both `created`
+// and `date` (due date) to know the goal's total timespan; silently shows
+// nothing if either is missing (e.g. older goals without `created`).
+function goalTimeBarHtml(g) {
+  if (!g.date || !g.created) return '';
+  const due = new Date(g.date + 'T00:00:00');
+  const start = new Date(g.created);
+  const today = new Date(); today.setHours(0,0,0,0);
+  start.setHours(0,0,0,0);
+  if (isNaN(start.getTime()) || isNaN(due.getTime())) return '';
+  const total = due - start;
+  if (total <= 0) return '';
+  const overdue = today.getTime() > due.getTime();
+  let widthPct, color;
+  if (overdue) {
+    widthPct = 100; color = 'var(--red)';
+  } else {
+    let fracRemaining = 1 - ((today - start) / total);
+    fracRemaining = Math.max(0, Math.min(1, fracRemaining));
+    widthPct = Math.round(fracRemaining * 100);
+    color = widthPct >= 50 ? 'var(--green)' : widthPct >= 20 ? 'var(--yellow)' : 'var(--red)';
+  }
+  return `<div style="margin-top:6px;height:4px;background:var(--bg4);border-radius:3px;overflow:hidden">
+    <div style="height:100%;width:${widthPct}%;background:${color};border-radius:3px"></div>
+  </div>`;
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return '';
   const d = new Date(dateStr + 'T00:00:00');
@@ -2236,16 +2275,27 @@ function countdownText(dateStr) {
 // ========== CHECK FAILED ==========
 function checkFailed() {
   let changed = false;
+  const justExpired = [];
   goals.forEach(g => {
     if (g.status === 'active') {
       const d = getDaysLeft(g.date);
       if (d !== null && d < 0) {
         g.status = 'failed';
         changed = true;
+        justExpired.push(g.name || 'Unnamed goal');
       }
     }
   });
-  if (changed) { save(); renderGoals(); }
+  if (changed) {
+    save();
+    renderGoals();
+    renderByPeriod();
+    if (justExpired.length === 1) {
+      showToast('⏰ Se acabó el tiempo de tu meta: ' + justExpired[0]);
+    } else if (justExpired.length > 1) {
+      showToast('⏰ ' + justExpired.length + ' metas vencieron: ' + justExpired.join(', '));
+    }
+  }
 }
 
 // ========== PAGES ==========
@@ -2459,6 +2509,7 @@ function renderGoalCard(g, idx) {
           ${ctText ? `<span class="countdown ${ctClass}">${ctText}</span>` : ''}
           ${g.steps && g.steps.length ? `<span class="goal-tag">${g.steps.filter(s=>s.done).length}/${g.steps.length} steps</span>` : ''}
         </div>
+        ${status === 'active' ? goalTimeBarHtml(g) : ''}
       </div>
       <div class="goal-actions" onclick="event.stopPropagation()">
         
@@ -3077,6 +3128,17 @@ function setScanMode(mode) {
   }
 }
 
+// Look at a month's habit names WITHOUT creating/seeding that month. Returns []
+// if the user hasn't actually typed anything for that exact month yet — this is
+// what lets the scanner ask Gemini to detect names from the photo instead of
+// wrongly assuming they're the same as some other month's habits.
+function peekHabitNames(year, month) {
+  const k = habitKey(year, month);
+  const arr = (habitData.habitsByMonth && habitData.habitsByMonth[k]) || null;
+  if (!arr) return [];
+  return arr.filter(h => h && h.trim());
+}
+
 function buildScanPrompt() {
   const MONTHS_LIST = ['January','February','March','April','May','June',
                        'July','August','September','October','November','December'];
@@ -3086,28 +3148,34 @@ function buildScanPrompt() {
   const yVal = (ySel && ySel.value !== '') ? parseInt(ySel.value) : habitYear;
   const monthName = MONTHS_LIST[isNaN(mVal) ? habitMonth : mVal];
   const year = isNaN(yVal) ? habitYear : yVal;
+  const mUse = isNaN(mVal) ? habitMonth : mVal;
+  const lastDay = new Date(year, mUse + 1, 0).getDate();
 
-  const activeHabits = habitsOf(year, isNaN(mVal) ? habitMonth : mVal).filter(h => h.trim());
-  const habitSection = activeHabits.length > 0
-    ? 'The habit columns from LEFT to RIGHT are:\n' + activeHabits.map((h,i) => (i+1)+'. '+h).join('\n')
-    : 'Identify all habit names written diagonally at the top of each column.';
+  // Names the user already typed for THIS exact month (never borrowed from another
+  // month). Used only as a helpful reference for spelling/order — Gemini should still
+  // read the actual handwriting, in case the notebook differs from what's in the app.
+  const knownHabits = peekHabitNames(year, mUse);
+  const habitSection = knownHabits.length > 0
+    ? 'For reference, the app currently has these habit names recorded for this month:\n' + knownHabits.map((h,i) => (i+1)+'. '+h).join('\n') +
+      '\n\nSTILL read the actual handwritten name above each column yourself — do not just copy this list blindly. If a column\'s handwriting clearly matches one of these names, use the exact spelling from this list (handwriting can be messy, this list helps disambiguate). If a column does not match any name on this list (e.g. the order differs, or it is a habit not yet recorded in the app), report exactly what you read instead of forcing it to match.'
+    : 'The app has no habit names recorded for this month yet. READ the handwritten habit name above each column (usually written diagonally or vertically) and report exactly what is written, in left-to-right column order. Do not invent generic names like "Habit 1" — transcribe the real handwriting.';
 
-  const promptText = "You are helping import data into Goalife, a personal habit tracking app. The user has a physical handwritten habit tracker for " + monthName + " " + year + ".\n\n" +
-    "HOW THE NOTEBOOK WORKS:\n" +
-    "- It is a monthly grid. Each COLUMN = one habit. Each ROW = one day of the month (1 to 31).\n" +
-    "- Habit names are written DIAGONALLY or VERTICALLY at the TOP of each column.\n" +
-    "- A cell that is FILLED, SCRIBBLED, HATCHED, or has ANY pen marks = habit completed that day.\n" +
-    "- An EMPTY or BLANK cell = NOT completed.\n\n" +
+  const promptText = "You are helping import data into Goalife, a personal habit tracking app, from a photo of a HANDWRITTEN paper habit tracker for " + monthName + " " + year + ".\n\n" +
+    "GRID LAYOUT:\n" +
+    "- Each COLUMN = one habit. Each ROW = one calendar day (1 to " + lastDay + ").\n" +
+    "- Habit names are handwritten at the TOP of each column (diagonal or vertical text). ALWAYS read these names directly from the photo, column by column.\n" +
+    "- Day numbers (1, 2, 3...) usually run down the LEFT side as rows — use them to confirm row alignment before reading marks; a common mistake is being off by one row, so double-check using the printed/handwritten day numbers.\n" +
+    "- A cell counts as COMPLETED if it has ANY pen mark inside it: a checkmark, X, dot, scribble, hatching, or shading. A clean empty box = NOT completed.\n\n" +
     habitSection + "\n\n" +
     "YOUR TASK:\n" +
-    "For each habit column (in left-to-right order), scan every row from day 1 to 31 and list which days have a marked cell.\n\n" +
+    "1. Go column by column (habit by habit), reading the handwritten name at the top of each one. For each column, go down EVERY row from day 1 to " + lastDay + " and record which days are marked.\n" +
+    "2. Self-check before answering: re-count the marked cells you found for each habit and make sure that count visually matches what you see in the photo for that column. Fix any row-alignment mistakes now, not after.\n\n" +
     "STRICT RULES:\n" +
-    "- Only mark a day as completed if the cell CLEARLY has marks inside it. If unsure = NOT completed.\n" +
-    "- Do NOT invent or guess completions.\n" +
-    "- Return ALL habits listed above, even if completedDays is [].\n" +
-    "- Keep the exact left-to-right order.\n\n" +
+    "- Only mark a day completed if the cell CLEARLY has a mark. If unsure or the photo is blurry there = leave it NOT completed.\n" +
+    "- Do NOT invent or guess completions, and do NOT skip a habit column even if it looks empty (return completedDays: [] for it).\n" +
+    "- Keep the exact left-to-right column order from the photo.\n\n" +
     'RESPOND WITH ONLY valid JSON — no markdown, no code block, no explanation:\n' +
-    '{\n  \"habits\": [\n    { \"name\": \"habit name\", \"completedDays\": [1, 3, 5] }\n  ]\n}';
+    '{\n  "habits": [\n    { "name": "habit name", "completedDays": [1, 3, 5] }\n  ]\n}';
 
   try {
     const box = document.getElementById('scan-prompt-box');
@@ -3168,7 +3236,9 @@ function applyPastedScan() {
   try {
     const clean = raw.replace(/```json/g, '').replace(/```/g, '').trim();
     const si = clean.indexOf('{'), ei = clean.lastIndexOf('}') + 1;
-    const parsed = JSON.parse(clean.substring(si, ei));
+    let jsonStr = clean.substring(si, ei);
+    jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1'); // strip trailing commas, a common AI JSON slip
+    const parsed = JSON.parse(jsonStr);
     if (!parsed.habits || !parsed.habits.length) throw new Error('No habits found');
     scanResults = { habits: parsed.habits, month: targetMonth, year: targetYear, confidence: 'high', autoDetected: false };
     const days = new Date(targetYear, targetMonth + 1, 0).getDate();
@@ -3382,6 +3452,16 @@ function toggleScanDot(habitIdx, day, el) {
   row.querySelector('div:last-child').textContent = `${h.completedDays.length} days completed`;
 }
 
+// Loose name match: exact (case/space-insensitive) OR one name contains the other —
+// handles handwriting vs app spelling differences (e.g. "Agua" vs "Tomar agua").
+function namesMatch(a, b) {
+  const na = (a || '').toLowerCase().trim(), nb = (b || '').toLowerCase().trim();
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.length >= 3 && nb.length >= 3 && (na.includes(nb) || nb.includes(na))) return true;
+  return false;
+}
+
 function applyScanResults() {
   if (!scanResults) return;
   const { habits, month, year } = scanResults;
@@ -3389,17 +3469,18 @@ function applyScanResults() {
   if (!habitData.log[key]) habitData.log[key] = {};
   const monthHabits = habitsOf(year, month); // names for the scanned month
 
-  // Match scanned habits to existing habit slots by name (fuzzy) or fill empty slots
+  // Match scanned habits to existing habit slots by name (fuzzy) or fill/create a slot
   habits.forEach((scanned, si) => {
-    // Find matching slot index
-    let slotIdx = monthHabits.findIndex(
-      h => h && h.toLowerCase().trim() === scanned.name.toLowerCase().trim()
-    );
-    // If no match, use next empty slot or si index
+    let slotIdx = monthHabits.findIndex(h => namesMatch(h, scanned.name));
     if (slotIdx === -1) {
-      slotIdx = monthHabits.findIndex((h, i) => !h || h.trim() === '');
-      if (slotIdx === -1) slotIdx = Math.min(si, 9);
-      monthHabits[slotIdx] = scanned.name;
+      slotIdx = monthHabits.findIndex(h => !h || h.trim() === '');
+      if (slotIdx === -1) {
+        // No empty slot left — grow the list instead of overwriting another habit.
+        slotIdx = monthHabits.length;
+        monthHabits.push(scanned.name);
+      } else {
+        monthHabits[slotIdx] = scanned.name;
+      }
     }
 
     // Write completed days
@@ -3456,7 +3537,14 @@ function habitsOf(year, month) {
   if (!habitData.habitsByMonth) habitData.habitsByMonth = {};
   const k = habitKey(year, month);
   if (!habitData.habitsByMonth[k]) {
-    const seed = (habitData.habits && habitData.habits.length) ? habitData.habits.slice() : ['','','','',''];
+    // Brand-new month: carry over the names from the most recent EARLIER month that
+    // has habits. If there's none, start empty. Each month is independent afterwards.
+    let seed = ['', '', '', '', ''];
+    const earlier = Object.keys(habitData.habitsByMonth).filter(kk => kk < k).sort();
+    for (let i = earlier.length - 1; i >= 0; i--) {
+      const arr = habitData.habitsByMonth[earlier[i]];
+      if (Array.isArray(arr) && arr.some(h => h && h.trim())) { seed = arr.slice(); break; }
+    }
     while (seed.length < 5) seed.push('');
     habitData.habitsByMonth[k] = seed;
   }
@@ -3476,16 +3564,31 @@ function migrateHabitsByMonth() {
 
 // Deliberate clear of one habit's marks for the CURRENT month (name stays).
 function clearHabitMarks(idx) {
-  const name = (habitsOf(habitYear, habitMonth)[idx] || '').trim() || ('Habit ' + (idx + 1));
-  if (!confirm('Clear all marks for "' + name + '" this month?\nThe habit name stays — only the daily checks are removed.')) return;
+  const habits = habitsOf(habitYear, habitMonth);
+  const name = (habits[idx] || '').trim() || ('Habit ' + (idx + 1));
+  if (!confirm('Delete "' + name + '" from this month?\nThe habit name and all its checks will be removed.')) return;
   const k = habitKey(habitYear, habitMonth);
-  if (habitData.log[k]) {
-    const dim = daysInMonth(habitYear, habitMonth);
-    for (let d = 1; d <= dim; d++) delete habitData.log[k][d + '-' + idx];
+  const dim = daysInMonth(habitYear, habitMonth);
+  const log = habitData.log[k] || (habitData.log[k] = {});
+  const origLen = habits.length;
+  // Rebuild THIS month's marks: drop the removed habit and shift later habits down one slot
+  const newLog = {};
+  for (let d = 1; d <= dim; d++) {
+    let ni = 0;
+    for (let oi = 0; oi < origLen; oi++) {
+      if (oi === idx) continue;
+      if (log[d + '-' + oi]) newLog[d + '-' + ni] = true;
+      ni++;
+    }
   }
+  habitData.log[k] = newLog;
+  habits.splice(idx, 1);
+  while (habits.length < 5) habits.push('');
+  habitData.habitsByMonth[k] = habits;
   saveHabits();
   renderHabitTracker();
-  showToast('🗑 Marks cleared: ' + name);
+  renderDaySummary();
+  showToast('Habit deleted: ' + name);
 }
 
 // Mark/unmark a cell with a single tap (replaces the old 300ms hold).
@@ -3635,11 +3738,9 @@ function tplApply(ti) {
 function updateHabitName(idx, value) {
   const habits = habitsOf(habitYear, habitMonth);
   habits[idx] = value;
-  // keep the rolling template in sync so brand-new months inherit the latest names
-  habitData.habits = habits.slice();
+  // NOTE: we intentionally do NOT touch a global template — each month is independent.
   if (value.trim() && idx === habits.length - 1 && habits.length < 20) {
     habits.push('');
-    habitData.habits = habits.slice();
     renderHabitTracker();
   }
   // Save to localStorage immediately, debounce only cloud sync
@@ -3695,7 +3796,7 @@ function renderHabitTracker() {
                value="${escHtml(habits[h] || '')}"
                onblur="updateHabitName(${h}, this.value)"
                onchange="updateHabitName(${h}, this.value)">
-        <button title="Clear this habit's marks for this month" onclick="clearHabitMarks(${h})"
+        <button title="Delete this habit (this month)" onclick="clearHabitMarks(${h})"
                 style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:0.8rem;padding:2px 5px;line-height:1;flex-shrink:0">✕</button>
       </div>
     </td>`;
@@ -3746,13 +3847,13 @@ function renderHabitChart(days, log, isCurrentMonth, todayDay) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   const maxDay = isCurrentMonth ? todayDay : days;
+  const habitNamesC = habitsOf(habitYear, habitMonth);
+  const activeIdxC = habitNamesC.map((h, i) => (h && h.trim()) ? i : -1).filter(i => i >= 0);
   const points = [];
 
   for (let d = 1; d <= maxDay; d++) {
     let count = 0;
-    for (let h = 0; h < 10; h++) {
-      if (log[`${d}-${h}`]) count++;
-    }
+    activeIdxC.forEach(h => { if (log[`${d}-${h}`]) count++; });
     points.push(count);
   }
 
@@ -3806,12 +3907,14 @@ function renderHabitChart(days, log, isCurrentMonth, todayDay) {
   ctx.stroke();
 
   // Dots
+  const nH = activeIdxC.length || 1;
   points.forEach((val, i) => {
     const x = padL + i * xStep;
     const y = padT + chartH - (val / maxVal) * chartH;
     ctx.beginPath();
     ctx.arc(x, y, 3, 0, Math.PI * 2);
-    ctx.fillStyle = val >= 7 ? '#3ecf8e' : val >= 4 ? '#d89673' : '#f25f5c';
+    const ratio = val / nH;
+    ctx.fillStyle = ratio >= 0.7 ? '#3ecf8e' : ratio >= 0.4 ? '#d89673' : '#f25f5c';
     ctx.fill();
   });
 
@@ -3826,46 +3929,193 @@ function renderHabitChart(days, log, isCurrentMonth, todayDay) {
   labelsEl.innerHTML = labHtml;
 }
 
+// ---- Helpers for streaks & weekly % ----
+function mondayOf(date) {
+  const d = new Date(date);
+  const day = d.getDay(); // 0=Sun..6=Sat
+  d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
+  return d;
+}
+
+function calcCurrentStreak(activeIdx, maxDay, log) {
+  let best = 0;
+  activeIdx.forEach(h => {
+    let s = 0;
+    for (let d = maxDay; d >= 1; d--) { if (log[`${d}-${h}`]) s++; else break; }
+    if (s > best) best = s;
+  });
+  return best;
+}
+
+function calcBestStreak(activeIdx, maxDay, log) {
+  let best = 0;
+  activeIdx.forEach(h => {
+    let cur = 0;
+    for (let d = 1; d <= maxDay; d++) {
+      if (log[`${d}-${h}`]) { cur++; if (cur > best) best = cur; }
+      else cur = 0;
+    }
+  });
+  return best;
+}
+
+// Weekly % for the Mon–Sun week containing `refDay` of (year, month). Resets each
+// week; only counts days that belong to THIS month (data from adjacent months
+// isn't tracked together, so a week spanning two months only counts its in-month days).
+function calcWeeklyPct(year, month, refDay, activeIdx, log) {
+  const ref = new Date(year, month, refDay);
+  const mon = mondayOf(ref);
+  let possible = 0, done = 0;
+  for (let i = 0; i < 7; i++) {
+    const wd = new Date(mon); wd.setDate(mon.getDate() + i);
+    if (wd.getFullYear() === year && wd.getMonth() === month && wd.getDate() <= refDay) {
+      possible += activeIdx.length;
+      activeIdx.forEach(h => { if (log[`${wd.getDate()}-${h}`]) done++; });
+    }
+  }
+  return possible > 0 ? Math.round((done / possible) * 100) : 0;
+}
+
 function renderHabitStats(days, log, isCurrentMonth, todayDay) {
   const maxDay = isCurrentMonth ? todayDay : days;
-  let totalPossible = maxDay * 10;
-  let totalDone = 0;
-  let bestDay = 0, bestDayCount = 0;
-  let worstDay = 99, worstDayCount = 0;
+  const habitNames = habitsOf(habitYear, habitMonth);
+  const activeIdx = habitNames.map((h, i) => (h && h.trim()) ? i : -1).filter(i => i >= 0);
 
-  for (let d = 1; d <= maxDay; d++) {
-    let count = 0;
-    for (let h = 0; h < 10; h++) {
-      if (log[`${d}-${h}`]) { count++; totalDone++; }
-    }
-    if (count > bestDayCount) { bestDayCount = count; bestDay = d; }
-    if (count < worstDayCount || d === 1) { worstDayCount = count; worstDay = d; }
-  }
+  const currentStreak = calcCurrentStreak(activeIdx, maxDay, log);
+  const bestStreak = calcBestStreak(activeIdx, maxDay, log);
+  const weeklyPct = calcWeeklyPct(habitYear, habitMonth, maxDay, activeIdx, log);
 
-  const pct = totalPossible > 0 ? Math.round((totalDone / totalPossible) * 100) : 0;
+  const now = new Date();
+  const isPastMonth = (habitYear < now.getFullYear()) || (habitYear === now.getFullYear() && habitMonth < now.getMonth());
+  const reviewBtn = isPastMonth
+    ? `<button class="btn btn-ghost btn-sm" style="flex-basis:100%;margin-top:4px" onclick="openMonthlyReview(${habitYear},${habitMonth})">
+         <svg class="ico" width="14" height="14" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M18.7 8 12 14.7l-3.3-3.3L3 17"/></svg> Ver progreso mensual
+       </button>`
+    : '';
 
   document.getElementById('habit-stats').innerHTML = `
     <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px">
-      <div style="font-size:0.7rem;color:var(--text3)">Completion</div>
-      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--accent2)">${pct}%</div>
-      <div style="font-size:0.7rem;color:var(--text3)">${totalDone} / ${totalPossible}</div>
+      <div style="font-size:0.7rem;color:var(--text3)">Current Streak</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--accent2)">${currentStreak > 0 ? '🔥 ' + currentStreak : '—'}</div>
+      <div style="font-size:0.7rem;color:var(--text3)">${currentStreak === 1 ? 'day' : 'days'} in a row</div>
     </div>
     <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px">
-      <div style="font-size:0.7rem;color:var(--text3)">Best Day</div>
-      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--green)">Day ${bestDay || '—'}</div>
-      <div style="font-size:0.7rem;color:var(--text3)">${bestDayCount} habits</div>
+      <div style="font-size:0.7rem;color:var(--text3)">Best Streak</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--green)">${bestStreak > 0 ? bestStreak : '—'}</div>
+      <div style="font-size:0.7rem;color:var(--text3)">this month</div>
     </div>
     <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px">
-      <div style="font-size:0.7rem;color:var(--text3)">Days Tracked</div>
-      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--yellow)">${maxDay}</div>
-      <div style="font-size:0.7rem;color:var(--text3)">of ${days} days</div>
+      <div style="font-size:0.7rem;color:var(--text3)">This Week</div>
+      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--blue)">${weeklyPct}%</div>
+      <div style="font-size:0.7rem;color:var(--text3)">Mon–Sun</div>
     </div>
-    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px">
-      <div style="font-size:0.7rem;color:var(--text3)">Avg / Day</div>
-      <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--blue)">${maxDay > 0 ? (totalDone/maxDay).toFixed(1) : '0'}</div>
-      <div style="font-size:0.7rem;color:var(--text3)">habits/day</div>
+    ${reviewBtn}
+  `;
+}
+
+// ========== MONTHLY REVIEW (idea 4) ==========
+function openMonthlyReview(year, month) {
+  const MN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  document.getElementById('mr-title').textContent = MN[month] + ' ' + year + ' — Review';
+  renderMonthlyReviewBody(year, month);
+  document.getElementById('monthly-review-modal').classList.add('open');
+}
+
+function renderMonthlyReviewBody(year, month) {
+  const dim = daysInMonth(year, month);
+  const names = habitsOf(year, month);
+  const activeIdx = names.map((h, i) => (h && h.trim()) ? i : -1).filter(i => i >= 0);
+  const k = habitKey(year, month);
+  const log = (habitData.log && habitData.log[k]) || {};
+
+  let totalDone = 0, bestDay = 0, bestDayCount = 0;
+  const perHabitDone = {}; activeIdx.forEach(h => perHabitDone[h] = 0);
+  for (let d = 1; d <= dim; d++) {
+    let count = 0;
+    activeIdx.forEach(h => { if (log[`${d}-${h}`]) { count++; totalDone++; perHabitDone[h]++; } });
+    if (count > bestDayCount) { bestDayCount = count; bestDay = d; }
+  }
+  const totalPossible = dim * activeIdx.length;
+  const pct = totalPossible > 0 ? Math.round((totalDone / totalPossible) * 100) : 0;
+
+  let bestHabitIdx = -1, bestHabitPct = -1;
+  activeIdx.forEach(h => {
+    const p = dim > 0 ? (perHabitDone[h] / dim * 100) : 0;
+    if (p > bestHabitPct) { bestHabitPct = p; bestHabitIdx = h; }
+  });
+  const bestHabitName = bestHabitIdx >= 0 ? names[bestHabitIdx] : null;
+
+  // Compare vs previous month, if it has recorded habits
+  let prevMonth = month - 1, prevYear = year;
+  if (prevMonth < 0) { prevMonth = 11; prevYear = year - 1; }
+  const prevK = habitKey(prevYear, prevMonth);
+  const prevNames = (habitData.habitsByMonth && habitData.habitsByMonth[prevK]) || null;
+  let comparisonHtml = '';
+  if (prevNames && prevNames.some(h => h && h.trim())) {
+    const prevActiveIdx = prevNames.map((h, i) => (h && h.trim()) ? i : -1).filter(i => i >= 0);
+    const prevDim = daysInMonth(prevYear, prevMonth);
+    const prevLog = (habitData.log && habitData.log[prevK]) || {};
+    let prevDone = 0;
+    for (let d = 1; d <= prevDim; d++) { prevActiveIdx.forEach(h => { if (prevLog[`${d}-${h}`]) prevDone++; }); }
+    const prevPossible = prevDim * prevActiveIdx.length;
+    const prevPct = prevPossible > 0 ? Math.round((prevDone / prevPossible) * 100) : 0;
+    const diff = pct - prevPct;
+    const up = diff >= 0;
+    comparisonHtml = `
+      <div style="display:flex;align-items:center;gap:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px">
+        <svg class="ico" width="22" height="22" viewBox="0 0 24 24" style="color:${up ? 'var(--green)' : 'var(--red)'};flex-shrink:0">${up ? '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>' : '<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>'}</svg>
+        <div>
+          <div style="font-size:0.75rem;color:var(--text3)">vs ${MONTHS_SHORT[prevMonth]} ${prevYear} (${prevPct}%)</div>
+          <div style="font-weight:700;color:${up ? 'var(--green)' : 'var(--red)'}">${up ? '+' : ''}${diff}% ${up ? 'better' : 'lower'}</div>
+        </div>
+      </div>`;
+  }
+
+  // Weekly breakdown — split the month into Mon–Sun weeks
+  const weeks = [];
+  let wStart = 1;
+  while (wStart <= dim) {
+    const wd = new Date(year, month, wStart).getDay(); // 0=Sun..6=Sat
+    const untilSunday = wd === 0 ? 0 : (7 - wd);
+    const wEnd = Math.min(wStart + untilSunday, dim);
+    weeks.push([wStart, wEnd]);
+    wStart = wEnd + 1;
+  }
+  const weekTotals = weeks.map(([s, e]) => {
+    let t = 0;
+    for (let d = s; d <= e; d++) activeIdx.forEach(h => { if (log[`${d}-${h}`]) t++; });
+    return t;
+  });
+  const maxWeek = Math.max(...weekTotals, 1);
+  const weekBars = weeks.map(([s, e], i) => {
+    const barH = Math.round((weekTotals[i] / maxWeek) * 60) + 6;
+    return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1">
+      <div style="font-size:0.68rem;color:var(--text3)">${weekTotals[i]}</div>
+      <div style="width:70%;height:${barH}px;background:var(--accent);border-radius:4px"></div>
+      <div style="font-size:0.62rem;color:var(--text3)">${s}-${e}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('monthly-review-body').innerHTML = `
+    <div style="text-align:center;margin-bottom:16px">
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:2.2rem;color:var(--accent2)">${pct}%</div>
+      <div style="font-size:0.8rem;color:var(--text3)">overall completion</div>
     </div>
-    
+    ${comparisonHtml}
+    <div style="display:flex;gap:10px;margin-bottom:16px">
+      <div style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center">
+        <div style="font-size:0.72rem;color:var(--text3);margin-bottom:4px">🏆 Best day</div>
+        <div style="font-weight:700;color:var(--text)">${bestDay ? 'Day ' + bestDay : '—'}</div>
+        <div style="font-size:0.7rem;color:var(--text3)">${bestDayCount} habits</div>
+      </div>
+      <div style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center">
+        <div style="font-size:0.72rem;color:var(--text3);margin-bottom:4px">⭐ Best habit</div>
+        <div style="font-weight:700;color:var(--text)">${bestHabitName ? escHtml(bestHabitName) : '—'}</div>
+        <div style="font-size:0.7rem;color:var(--text3)">${bestHabitIdx >= 0 ? Math.round(bestHabitPct) + '%' : ''}</div>
+      </div>
+    </div>
+    <div style="font-size:0.78rem;font-weight:600;color:var(--text);margin-bottom:8px">Weekly breakdown</div>
+    <div style="display:flex;gap:6px;align-items:flex-end;height:100px">${weekBars}</div>
   `;
 }
 // init() is called by auth.onAuthStateChanged when user logs in
@@ -4031,6 +4281,7 @@ function closeSearch() {
 
 // ========== HABIT REMINDERS ==========
 let habitReminders = JSON.parse(localStorage.getItem(lsKey('habit_reminders')) || '{}');
+let habitReminderFreq = JSON.parse(localStorage.getItem(lsKey('habit_reminder_freq')) || '{}'); // idx -> 'once' | '2h' | '3h'
 
 function openHabitReminders() {
   const body = document.getElementById('habit-reminder-body');
@@ -4051,13 +4302,19 @@ function openHabitReminders() {
     body.innerHTML = pushRow + '<div style="padding:20px;text-align:center;color:var(--text2)">First add habits in the Habits tab</div>';
   } else {
     body.innerHTML = pushRow + activeHabits.map(h => `
-      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;">
-        <div style="flex:1">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:90px">
           <div style="font-weight:600;color:var(--text);font-size:0.9rem">${escHtml(h.name)}</div>
-          <div style="font-size:0.75rem;color:var(--text3)">Daily reminder</div>
+          <div style="font-size:0.75rem;color:var(--text3)">Reminder</div>
         </div>
         <input type="time" id="reminder-${h.idx}" value="${habitReminders[h.idx] || ''}"
           style="background:var(--bg4);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:0.9rem;font-family:'DM Sans',sans-serif;">
+        <select id="reminder-freq-${h.idx}"
+          style="background:var(--bg4);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:0.82rem;font-family:'DM Sans',sans-serif;">
+          <option value="once" ${(!habitReminderFreq[h.idx] || habitReminderFreq[h.idx]==='once') ? 'selected':''}>Once a day</option>
+          <option value="2h" ${habitReminderFreq[h.idx]==='2h' ? 'selected':''}>Every 2 hours</option>
+          <option value="3h" ${habitReminderFreq[h.idx]==='3h' ? 'selected':''}>Every 3 hours</option>
+        </select>
       </div>`).join('');
   }
   document.getElementById('habit-reminder-modal').classList.add('open');
@@ -4109,14 +4366,35 @@ function saveHabitReminders() {
   habitsOf(habitYear, habitMonth).forEach((h, i) => {
     if (!h.trim()) return;
     const el = document.getElementById(`reminder-${i}`);
+    const freqEl = document.getElementById(`reminder-freq-${i}`);
     if (el && el.value) habitReminders[i] = el.value;
     else delete habitReminders[i];
+    if (freqEl) habitReminderFreq[i] = freqEl.value;
   });
   localStorage.setItem(lsKey('habit_reminders'), JSON.stringify(habitReminders));
+  localStorage.setItem(lsKey('habit_reminder_freq'), JSON.stringify(habitReminderFreq));
   scheduleHabitReminders();
   scheduleHabitRemindersOneSignal();
   closeModal('habit-reminder-modal');
   showToast('⏰ Reminders saved');
+}
+
+// Expands a habit's start time + frequency into one or more HH:MM slots for today.
+// 'once' -> just that time. '2h'/'3h' -> repeats every 2/3 hours until a 10pm cutoff
+// so reminders don't fire in the middle of the night.
+function getReminderSlots(time, freq) {
+  const [h, m] = time.split(':').map(Number);
+  const stepHours = freq === '2h' ? 2 : freq === '3h' ? 3 : null;
+  if (!stepHours) return [time];
+  const slots = [time]; // always honor the user's chosen start time, even if it's late
+  const cutoffMinutes = 22 * 60; // 10:00 PM — only applies to the repeats after the start time
+  let curMinutes = h * 60 + m + stepHours * 60;
+  while (curMinutes <= cutoffMinutes) {
+    const hh = Math.floor(curMinutes / 60), mm = curMinutes % 60;
+    slots.push(String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0'));
+    curMinutes += stepHours * 60;
+  }
+  return slots;
 }
 
 function scheduleHabitReminders() {
@@ -4169,35 +4447,40 @@ async function scheduleHabitRemindersOneSignal() {
     const habitName = habitsOf(new Date().getFullYear(), new Date().getMonth())[idx];
     if (!habitName || !habitName.trim()) continue;
 
-    const [h, m] = time.split(':').map(Number);
-    const next = new Date();
-    next.setHours(h, m, 0, 0);
-    if (next <= new Date()) next.setDate(next.getDate() + 1);
+    const freq = habitReminderFreq[idx] || 'once';
+    const slots = getReminderSlots(time, freq);
 
-    // De-duplication: OneSignal cannot cancel a notification targeted at a single
-    // user, so we must avoid scheduling duplicates. We only schedule a new one if
-    // we don't already have a future notification armed for this habit at this time.
-    const armKey = 'os_next_' + uid + '_' + idx;
-    try {
-      const armed = JSON.parse(localStorage.getItem(armKey) || 'null');
-      if (armed && armed.time === time && new Date(armed.when) > new Date()) continue;
-    } catch(e) {}
+    for (const slot of slots) {
+      const [h, m] = slot.split(':').map(Number);
+      const next = new Date();
+      next.setHours(h, m, 0, 0);
+      if (next <= new Date()) next.setDate(next.getDate() + 1);
 
-    try {
-      const res = await fetch(PUSH_WORKER_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          playerId: playerId,
-          title: 'Goalife',
-          body: '¡Recuerda ' + habitName + ' hoy! 💪',
-          sendAfter: next.toISOString()
-        })
-      });
-      if (res.ok) {
-        localStorage.setItem(armKey, JSON.stringify({ time: time, when: next.toISOString() }));
-      }
-    } catch(e) { /* network fail — will retry next time the app opens */ }
+      // De-duplication: OneSignal cannot cancel a notification targeted at a single
+      // user, so we must avoid scheduling duplicates. We only schedule a new one if
+      // we don't already have a future notification armed for this habit at this slot.
+      const armKey = 'os_next_' + uid + '_' + idx + '_' + slot;
+      try {
+        const armed = JSON.parse(localStorage.getItem(armKey) || 'null');
+        if (armed && armed.time === slot && new Date(armed.when) > new Date()) continue;
+      } catch(e) {}
+
+      try {
+        const res = await fetch(PUSH_WORKER_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: playerId,
+            title: 'Goalife',
+            body: '¡Recuerda ' + habitName + ' hoy! 💪',
+            sendAfter: next.toISOString()
+          })
+        });
+        if (res.ok) {
+          localStorage.setItem(armKey, JSON.stringify({ time: slot, when: next.toISOString() }));
+        }
+      } catch(e) { /* network fail — will retry next time the app opens */ }
+    }
   }
 }
 
