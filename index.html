@@ -40,6 +40,7 @@
     window._oneSignalReady = true;
     // Schedule any saved reminders via OneSignal once SDK is ready
     scheduleHabitRemindersOneSignal();
+    scheduleGoalRemindersOneSignal();
   });
 </script>
 
@@ -1805,6 +1806,13 @@
         <textarea class="form-textarea" id="detail-desc"></textarea>
       </div>
       <div class="form-group">
+        <label class="form-label">Reminder</label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="time" id="detail-notif" class="form-input" style="max-width:140px" onchange="updateDetailReminder()">
+          <span style="font-size:0.75rem;color:var(--text3)">Daily push reminder for this goal</span>
+        </div>
+      </div>
+      <div class="form-group">
         <label class="form-label">Steps</label>
         <div class="steps-list" id="detail-steps-list"></div>
         <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="addStep('detail-steps-list', true)">+ Add step</button>
@@ -1887,7 +1895,6 @@ let currentGoalId = null;
 let selectedIcon = '🎯';
 let newGridData = { rows: 2, cols: 3 };
 let detailGridData = { rows: 0, cols: 0 };
-let notifIntervals = [];
 
 const ICONS = ['💪','📚','▶️','🧠','🕺','✍️','💰','🏃','🎹','📈','🍽️','🏠','💻','🎸','🧘','💧','🌙','🥗','🙏','🌱'];
 
@@ -2636,6 +2643,7 @@ function openGoalDetail(id) {
   document.getElementById('detail-icon').textContent = g.icon;
   document.getElementById('detail-name').textContent = g.name;
   document.getElementById('detail-desc').value = g.desc || '';
+  document.getElementById('detail-notif').value = g.notif || '';
   document.getElementById('detail-period-tag').textContent = {daily:'Daily',weekly:'Weekly',monthly:'Monthly'}[g.period] || '';
   document.getElementById('detail-period-tag').className = `goal-tag ${g.period}`;
 
@@ -2680,6 +2688,17 @@ function openGoalDetail(id) {
 
   updateDetailProgress();
   document.getElementById('modal-goal-detail').classList.add('open');
+}
+
+function updateDetailReminder() {
+  if (!currentGoalId) return;
+  const g = goals.find(g => g.id === currentGoalId);
+  if (!g) return;
+  const val = document.getElementById('detail-notif').value;
+  g.notif = val || null;
+  save();
+  scheduleGoalRemindersOneSignal();
+  showToast(val ? '⏰ Reminder set for this goal' : 'Reminder removed');
 }
 
 function leaveGoal() {
@@ -2902,27 +2921,10 @@ function launchConfetti() {
 }
 
 // ========== NOTIFICATIONS ==========
-function scheduleNotification(goal) {
-  if (!goal.notif || !goal.date) return;
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'default') Notification.requestPermission();
-  const interval = setInterval(() => {
-    const now = new Date();
-    const [h, m] = goal.notif.split(':').map(Number);
-    if (now.getHours() === h && now.getMinutes() === m) {
-      if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification('Goalife — ' + goal.name, {
-          body: goal.desc || 'You have a pending goal 🎯'
-        });
-      }
-      const overlay = document.getElementById('alarm-overlay');
-      if (overlay) overlay.style.display = 'block';
-      showToast(`⏰ Reminder: ${goal.name}`, '');
-      setTimeout(() => { if (overlay) overlay.style.display = 'none'; }, 5000);
-    }
-  }, 30000);
-  notifIntervals.push(interval);
-}
+// NOTE: goal reminders are scheduled via scheduleGoalRemindersOneSignal() (push-based,
+// works even with the app closed). Local setInterval/Notification-API mechanisms used
+// to live here — removed because goal.notif was never even exposed in the UI, and the
+// old code paths could have fired duplicate notifications.
 
 function requestNotifPermission() {
   if ('Notification' in window && Notification.permission === 'default') {
@@ -3157,23 +3159,28 @@ function buildScanPrompt() {
   const knownHabits = peekHabitNames(year, mUse);
   const habitSection = knownHabits.length > 0
     ? 'For reference, the app currently has these habit names recorded for this month:\n' + knownHabits.map((h,i) => (i+1)+'. '+h).join('\n') +
-      '\n\nSTILL read the actual handwritten name above each column yourself — do not just copy this list blindly. If a column\'s handwriting clearly matches one of these names, use the exact spelling from this list (handwriting can be messy, this list helps disambiguate). If a column does not match any name on this list (e.g. the order differs, or it is a habit not yet recorded in the app), report exactly what you read instead of forcing it to match.'
-    : 'The app has no habit names recorded for this month yet. READ the handwritten habit name above each column (usually written diagonally or vertically) and report exactly what is written, in left-to-right column order. Do not invent generic names like "Habit 1" — transcribe the real handwriting.';
+      '\n\nSTILL read the actual handwritten habit names yourself from the photo — do not just copy this list blindly. If a handwritten name clearly matches one of these, use the exact spelling from this list (handwriting can be messy, this list helps disambiguate). If a habit you see in the photo does not match any name on this list (e.g. the order differs, or it is a habit not yet recorded in the app), report exactly what you read instead of forcing it to match.'
+    : 'The app has no habit names recorded for this month yet. READ each handwritten habit name directly from the photo and report exactly what is written. Do not invent generic names like "Habit 1" — transcribe the real handwriting.';
 
   const promptText = "You are helping import data into Goalife, a personal habit tracking app, from a photo of a HANDWRITTEN paper habit tracker for " + monthName + " " + year + ".\n\n" +
-    "GRID LAYOUT:\n" +
-    "- Each COLUMN = one habit. Each ROW = one calendar day (1 to " + lastDay + ").\n" +
-    "- Habit names are handwritten at the TOP of each column (diagonal or vertical text). ALWAYS read these names directly from the photo, column by column.\n" +
-    "- Day numbers (1, 2, 3...) usually run down the LEFT side as rows — use them to confirm row alignment before reading marks; a common mistake is being off by one row, so double-check using the printed/handwritten day numbers.\n" +
+    "IMPORTANT — DO NOT ASSUME A FIXED LAYOUT. Every person's notebook is drawn differently. Some examples of real variations seen in practice:\n" +
+    "- Habit names can be written as column headers (across the top, often diagonal) OR as row labels (down one side, written normally).\n" +
+    "- Day numbers can count UP (1, 2, 3...) or DOWN (e.g. 30, 29, 28... counting down to 1).\n" +
+    "- Not every day number may be individually labeled — sometimes only every 5th day is written (e.g. 30, 25, 20, 15...) as a tick mark, and you must count the grid lines between them to find the exact day for each cell.\n" +
+    "- There may be extra rows/columns that are NOT part of the daily grid at all — e.g. a tally/total number per day, or short priority letters next to each habit name (like \"P\", \"V\", \"f\", \"Ps\"). Do not confuse these with completion marks; only the actual day-by-habit cells count.\n\n" +
+    "YOUR FIRST STEP — FIGURE OUT THE LAYOUT FROM THE PHOTO ITSELF:\n" +
+    "1. Find the text labels that are clearly HABIT NAMES (words like a verb/activity, e.g. \"Ejercicio\", \"Leer\", \"Piano\") — figure out if they sit along the top or along a side.\n" +
+    "2. Find the NUMBERS that are clearly DAY-OF-MONTH labels (small integers between 1 and " + lastDay + ") — figure out which axis they're on, whether they go up or down, and the spacing between labeled ticks.\n" +
+    "3. Once you know which axis is \"habit\" and which axis is \"day\", and which direction the days run, read the grid accordingly. Every cell maps to exactly one (habit, day) pair — work this out before reading any marks.\n\n" +
     "- A cell counts as COMPLETED if it has ANY pen mark inside it: a checkmark, X, dot, scribble, hatching, or shading. A clean empty box = NOT completed.\n\n" +
     habitSection + "\n\n" +
     "YOUR TASK:\n" +
-    "1. Go column by column (habit by habit), reading the handwritten name at the top of each one. For each column, go down EVERY row from day 1 to " + lastDay + " and record which days are marked.\n" +
-    "2. Self-check before answering: re-count the marked cells you found for each habit and make sure that count visually matches what you see in the photo for that column. Fix any row-alignment mistakes now, not after.\n\n" +
+    "1. After identifying the layout (step above), go habit by habit. For each one, go through EVERY day from 1 to " + lastDay + " and record which days are marked — including days that only had a tick-mark label nearby, by counting grid lines from the nearest labeled number.\n" +
+    "2. Self-check before answering: for each habit, re-count the marked cells and confirm that count matches what's visible in the photo for that habit's full row/column. Fix any misalignment now, not after.\n\n" +
     "STRICT RULES:\n" +
     "- Only mark a day completed if the cell CLEARLY has a mark. If unsure or the photo is blurry there = leave it NOT completed.\n" +
-    "- Do NOT invent or guess completions, and do NOT skip a habit column even if it looks empty (return completedDays: [] for it).\n" +
-    "- Keep the exact left-to-right column order from the photo.\n\n" +
+    "- Do NOT invent or guess completions, and do NOT skip a habit even if its row/column looks empty (return completedDays: [] for it).\n" +
+    "- Ignore any tally numbers, totals, or priority letters that aren't part of the day-by-habit grid.\n\n" +
     'RESPOND WITH ONLY valid JSON — no markdown, no code block, no explanation:\n' +
     '{\n  "habits": [\n    { "name": "habit name", "completedDays": [1, 3, 5] }\n  ]\n}';
 
@@ -3508,14 +3515,12 @@ function init() {
   renderNotes();
   requestNotifPermission();
   renderDaySummary();
-  scheduleHabitReminders();
   showOnboarding();
 
   // Scroll active tab (Goals) into center on load
   const activeTab = document.querySelector('.tab.active');
   if (activeTab) setTimeout(() => activeTab.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'center' }), 50);
 
-  goals.filter(g => g.notif && g.status === 'active').forEach(scheduleNotification);
   setInterval(checkFailed, 60000);
   setInterval(updateHeaderDate, 60000);
   setInterval(renderDaySummary, 300000); // refresh summary every 5 min
@@ -3985,13 +3990,11 @@ function renderHabitStats(days, log, isCurrentMonth, todayDay) {
   const bestStreak = calcBestStreak(activeIdx, maxDay, log);
   const weeklyPct = calcWeeklyPct(habitYear, habitMonth, maxDay, activeIdx, log);
 
-  const now = new Date();
-  const isPastMonth = (habitYear < now.getFullYear()) || (habitYear === now.getFullYear() && habitMonth < now.getMonth());
-  const reviewBtn = isPastMonth
-    ? `<button class="btn btn-ghost btn-sm" style="flex-basis:100%;margin-top:4px" onclick="openMonthlyReview(${habitYear},${habitMonth})">
+  // Shown for ANY month, including the current one in progress — useful to check
+  // how things are going mid-month, not just after it closes.
+  const reviewBtn = `<button class="btn btn-ghost btn-sm" style="flex-basis:100%;margin-top:4px" onclick="openMonthlyReview(${habitYear},${habitMonth})">
          <svg class="ico" width="14" height="14" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M18.7 8 12 14.7l-3.3-3.3L3 17"/></svg> Ver progreso mensual
-       </button>`
-    : '';
+       </button>`;
 
   document.getElementById('habit-stats').innerHTML = `
     <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px">
@@ -4022,7 +4025,9 @@ function openMonthlyReview(year, month) {
 }
 
 function renderMonthlyReviewBody(year, month) {
-  const dim = daysInMonth(year, month);
+  const today = new Date();
+  const isCurrentMonth = (year === today.getFullYear() && month === today.getMonth());
+  const dim = isCurrentMonth ? today.getDate() : daysInMonth(year, month); // don't count future days with no data yet
   const names = habitsOf(year, month);
   const activeIdx = names.map((h, i) => (h && h.trim()) ? i : -1).filter(i => i >= 0);
   const k = habitKey(year, month);
@@ -4099,7 +4104,7 @@ function renderMonthlyReviewBody(year, month) {
   document.getElementById('monthly-review-body').innerHTML = `
     <div style="text-align:center;margin-bottom:16px">
       <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:2.2rem;color:var(--accent2)">${pct}%</div>
-      <div style="font-size:0.8rem;color:var(--text3)">overall completion</div>
+      <div style="font-size:0.8rem;color:var(--text3)">${isCurrentMonth ? 'completion so far (through day ' + dim + ')' : 'overall completion'}</div>
     </div>
     ${comparisonHtml}
     <div style="display:flex;gap:10px;margin-bottom:16px">
@@ -4373,7 +4378,6 @@ function saveHabitReminders() {
   });
   localStorage.setItem(lsKey('habit_reminders'), JSON.stringify(habitReminders));
   localStorage.setItem(lsKey('habit_reminder_freq'), JSON.stringify(habitReminderFreq));
-  scheduleHabitReminders();
   scheduleHabitRemindersOneSignal();
   closeModal('habit-reminder-modal');
   showToast('⏰ Reminders saved');
@@ -4397,31 +4401,10 @@ function getReminderSlots(time, freq) {
   return slots;
 }
 
-function scheduleHabitReminders() {
-  // Fallback: schedule via setTimeout (only works with app open)
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  Object.entries(habitReminders).forEach(([idx, time]) => {
-    if (!time) return;
-    const [h, m] = time.split(':').map(Number);
-    const now = new Date();
-    const next = new Date();
-    next.setHours(h, m, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
-    const delay = next - now;
-    setTimeout(() => {
-      const habitName = habitsOf(new Date().getFullYear(), new Date().getMonth())[idx];
-      if (habitName && 'serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({
-          type: 'SCHEDULE_NOTIF',
-          title: '📊 Goalife — ' + habitName,
-          body: "Don't forget to log your habit today!",
-          delay: 0
-        });
-      }
-      scheduleHabitReminders();
-    }, delay);
-  });
-}
+// NOTE: habit reminders are scheduled exclusively via scheduleHabitRemindersOneSignal()
+// (push-based, works even with the app closed). An older app-must-be-open fallback
+// used to live here with stale text and no icon — removed to avoid duplicate/
+// inconsistent notifications.
 
 // ===== ONESIGNAL: Schedule push notifications (work with app closed) =====
 // SECURITY: the REST API key NEVER lives here. It is stored as a secret on a
@@ -4481,6 +4464,51 @@ async function scheduleHabitRemindersOneSignal() {
         }
       } catch(e) { /* network fail — will retry next time the app opens */ }
     }
+  }
+}
+
+// Daily push reminder for goals — same pattern as habit reminders: works even
+// with the app closed, de-duplicated per-goal so re-opening the app never
+// double-schedules the same upcoming reminder.
+async function scheduleGoalRemindersOneSignal() {
+  if (!window._oneSignalReady) return;
+  if (!PUSH_WORKER_URL || PUSH_WORKER_URL.indexOf('PASTE_') === 0) return;
+  const active = goals.filter(g => g.status === 'active' && g.notif);
+  if (!active.length) return;
+
+  let playerId = null;
+  try { playerId = await OneSignal.User.PushSubscription.id; } catch(e) {}
+  if (!playerId) return; // user hasn't enabled notifications yet
+
+  const uid = currentUser ? currentUser.uid : 'anon';
+
+  for (const g of active) {
+    const [h, m] = g.notif.split(':').map(Number);
+    const next = new Date();
+    next.setHours(h, m, 0, 0);
+    if (next <= new Date()) next.setDate(next.getDate() + 1);
+
+    const armKey = 'os_goal_next_' + uid + '_' + g.id;
+    try {
+      const armed = JSON.parse(localStorage.getItem(armKey) || 'null');
+      if (armed && armed.time === g.notif && new Date(armed.when) > new Date()) continue;
+    } catch(e) {}
+
+    try {
+      const res = await fetch(PUSH_WORKER_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: playerId,
+          title: 'Goalife',
+          body: '🎯 No olvides tu meta: ' + g.name,
+          sendAfter: next.toISOString()
+        })
+      });
+      if (res.ok) {
+        localStorage.setItem(armKey, JSON.stringify({ time: g.notif, when: next.toISOString() }));
+      }
+    } catch(e) { /* network fail — will retry next time the app opens */ }
   }
 }
 
@@ -4578,62 +4606,11 @@ async function registerSW() {
   }
 }
 
-// ===== NOTIFICATION PERMISSION & SCHEDULING =====
-async function requestAndScheduleNotifs() {
-  if (!('Notification' in window)) return;
-  let perm = Notification.permission;
-  if (perm === 'default') {
-    perm = await Notification.requestPermission();
-  }
-  if (perm !== 'granted') return;
-  scheduleAllGoalNotifs();
-}
-
-function scheduleAllGoalNotifs() {
-  const goals = window.goals || [];
-  const active = goals.filter(g => g.status === 'active' && g.notif && g.date);
-  active.forEach(g => scheduleGoalNotifSW(g));
-}
-
-function scheduleGoalNotifSW(goal) {
-  const reg = window._swReg;
-  if (!reg || !reg.active) {
-    // Fallback: setTimeout
-    scheduleNotifFallback(goal);
-    return;
-  }
-  const now = new Date();
-  const [h, m] = goal.notif.split(':').map(Number);
-  const target = new Date();
-  target.setHours(h, m, 0, 0);
-  if (target <= now) target.setDate(target.getDate() + 1);
-  const delay = target - now;
-
-  reg.active.postMessage({
-    type: 'SCHEDULE_NOTIF',
-    delay,
-    title: `Goalife — ${goal.name}`,
-    body: goal.desc || '¡Es hora de trabajar en tu meta! 🎯',
-    tag: `goal-${goal.id}`
-  });
-}
-
-function scheduleNotifFallback(goal) {
-  const now = new Date();
-  const [h, m] = goal.notif.split(':').map(Number);
-  const target = new Date();
-  target.setHours(h, m, 0, 0);
-  if (target <= now) target.setDate(target.getDate() + 1);
-  const delay = target - now;
-  setTimeout(() => {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(`Goalife — ${goal.name}`, {
-        body: goal.desc || '¡Es hora de trabajar en tu meta! 🎯',
-        icon: generateIcon(96)
-      });
-    }
-  }, delay);
-}
+// NOTE: goal reminders are now scheduled via scheduleGoalRemindersOneSignal()
+// (push-based, works with the app closed) — see definition near the habit
+// reminders code. The setInterval/SW-message/Notification-API fallbacks that
+// used to live here were dead code (goal.notif was never exposed in the UI)
+// and risked firing duplicate notifications, so they were removed.
 
 // ===== INSTALL PROMPT (Add to Home Screen) =====
 let _installPrompt = null;
@@ -4802,7 +4779,6 @@ if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.
 (async () => {
   setupManifest();
   const reg = await registerSW();
-  await requestAndScheduleNotifs();
   showiOSInstallHint();
 })();
 
