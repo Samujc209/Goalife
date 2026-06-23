@@ -1226,6 +1226,36 @@
     pointer-events: none;
   }
 
+  /* ===== Habit drag-to-reorder ===== */
+  .habit-drag-handle {
+    background: none; border: none; cursor: grab; color: var(--text3);
+    padding: 2px 3px; line-height: 1; flex-shrink: 0; touch-action: none;
+  }
+  .habit-drag-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    z-index: 998; pointer-events: none; opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .habit-drag-overlay.show { opacity: 1; }
+  #habit-tbody tr.habit-row-dimmed {
+    opacity: 0.45; transition: opacity 0.15s;
+  }
+  #habit-tbody tr.habit-row-source .habit-name-cell {
+    opacity: 0.25;
+  }
+  .habit-drag-ghost {
+    position: fixed; z-index: 999; pointer-events: none;
+    background: var(--bg4); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 6px 14px; font-weight: 600;
+    color: var(--text); box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    transform: scale(1.06); white-space: nowrap;
+  }
+  .habit-drag-insert-line {
+    position: absolute; left: 0; right: 0; height: 3px;
+    background: var(--accent); border-radius: 2px; z-index: 5;
+    pointer-events: none;
+  }
+
   .habit-row-total {
     font-family: 'Syne', sans-serif;
     font-size: 0.72rem;
@@ -3134,6 +3164,220 @@ function setScanMode(mode) {
 // if the user hasn't actually typed anything for that exact month yet — this is
 // what lets the scanner ask Gemini to detect names from the photo instead of
 // wrongly assuming they're the same as some other month's habits.
+// ===== HABIT PRIORITY (weighted completion %) =====
+// Priority is stored per-month per-index, same pattern as habitsByMonth, so it stays
+// independent across months. A priority habit counts double toward completion %.
+function isHabitPriority(year, month, idx) {
+  const k = habitKey(year, month);
+  const arr = (habitData.priorityByMonth && habitData.priorityByMonth[k]) || null;
+  return !!(arr && arr[idx]);
+}
+
+function getHabitWeight(year, month, idx) {
+  return isHabitPriority(year, month, idx) ? 2 : 1;
+}
+
+function toggleHabitPriority(idx) {
+  if (!habitData.priorityByMonth) habitData.priorityByMonth = {};
+  const k = habitKey(habitYear, habitMonth);
+  if (!habitData.priorityByMonth[k]) habitData.priorityByMonth[k] = [];
+  habitData.priorityByMonth[k][idx] = !habitData.priorityByMonth[k][idx];
+  saveHabits();
+  renderHabitTracker();
+  renderDaySummary();
+}
+
+// Builds oldIdx -> newIdx mapping for moving one habit slot from fromIdx to toIdx,
+// shifting everything in between by one. Pure & easy to test in isolation.
+function buildMovePermutation(fromIdx, toIdx, length) {
+  const map = {};
+  for (let i = 0; i < length; i++) map[i] = i;
+  if (fromIdx === toIdx) return map;
+  if (fromIdx < toIdx) {
+    for (let i = fromIdx + 1; i <= toIdx; i++) map[i] = i - 1;
+  } else {
+    for (let i = toIdx; i < fromIdx; i++) map[i] = i + 1;
+  }
+  map[fromIdx] = toIdx;
+  return map;
+}
+
+// Moves a habit from one position to another WITHIN the currently viewed month:
+// reorders its name, its checked days, its priority flag, and its reminder
+// settings together, so nothing gets scrambled or left behind.
+function reorderHabit(fromIdx, toIdx) {
+  if (fromIdx === toIdx) return;
+  const k = habitKey(habitYear, habitMonth);
+  const names = habitsOf(habitYear, habitMonth);
+  if (toIdx < 0 || toIdx >= names.length) return;
+  const perm = buildMovePermutation(fromIdx, toIdx, names.length);
+
+  // Names: simple splice-move
+  const movedName = names[fromIdx];
+  names.splice(fromIdx, 1);
+  names.splice(toIdx, 0, movedName);
+  habitData.habitsByMonth[k] = names;
+
+  // Priority flags: same splice-move
+  const pri = (habitData.priorityByMonth && habitData.priorityByMonth[k]) || [];
+  const movedPri = !!pri[fromIdx];
+  pri.splice(fromIdx, 1);
+  pri.splice(toIdx, 0, movedPri);
+  if (!habitData.priorityByMonth) habitData.priorityByMonth = {};
+  habitData.priorityByMonth[k] = pri;
+
+  // Checked days: remap every "day-oldIdx" key to "day-newIdx"
+  const oldLog = habitData.log[k] || {};
+  const newLog = {};
+  Object.keys(oldLog).forEach(ck => {
+    if (!oldLog[ck]) return;
+    const [day, oldIdx] = ck.split('-').map(Number);
+    const newIdx = perm[oldIdx];
+    if (newIdx !== undefined) newLog[`${day}-${newIdx}`] = true;
+  });
+  habitData.log[k] = newLog;
+
+  // Reminders/frequency follow the habit, not the slot
+  const newReminders = {}, newFreq = {};
+  Object.keys(habitReminders).forEach(oi => {
+    const newIdx = perm[oi] !== undefined ? perm[oi] : oi;
+    newReminders[newIdx] = habitReminders[oi];
+  });
+  Object.keys(habitReminderFreq).forEach(oi => {
+    const newIdx = perm[oi] !== undefined ? perm[oi] : oi;
+    newFreq[newIdx] = habitReminderFreq[oi];
+  });
+  habitReminders = newReminders;
+  habitReminderFreq = newFreq;
+  localStorage.setItem(lsKey('habit_reminders'), JSON.stringify(habitReminders));
+  localStorage.setItem(lsKey('habit_reminder_freq'), JSON.stringify(habitReminderFreq));
+
+  saveHabits();
+  renderHabitTracker();
+  renderDaySummary();
+}
+
+// ===== HABIT DRAG-TO-REORDER (hold the grip icon, drag, drop) =====
+// Pure helper, kept separate so the targeting math can be unit-tested without
+// a real DOM: given the pointer's Y position and each row's cached rect,
+// figure out which index the dragged habit would land on if dropped now.
+function findDragTargetIdx(pointerY, rows) {
+  for (const r of rows) {
+    const mid = r.rect.top + r.rect.height / 2;
+    if (pointerY <= mid) return { idx: r.idx, lineTop: r.rect.top };
+  }
+  const last = rows[rows.length - 1];
+  return { idx: last.idx, lineTop: last.rect.bottom };
+}
+
+let _habitDrag = null;
+
+function habitDragStart(e, idx) {
+  if (_habitDrag) return; // ignore if one is somehow already in progress
+  e.preventDefault();
+  _habitDrag = { fromIdx: idx, targetIdx: idx, startY: e.clientY, lastY: e.clientY, dragging: false };
+  _habitDrag.timer = setTimeout(() => habitDragBegin(idx), 350);
+  document.addEventListener('pointermove', habitDragMove);
+  document.addEventListener('pointerup', habitDragEnd);
+  document.addEventListener('pointercancel', habitDragEnd);
+}
+
+function habitDragBegin(idx) {
+  if (!_habitDrag) return;
+  _habitDrag.dragging = true;
+
+  const tbody = document.getElementById('habit-tbody');
+  const rowEls = Array.from(tbody.querySelectorAll('tr'));
+  _habitDrag.rows = rowEls.map(r => ({
+    idx: parseInt(r.dataset.habitIdx, 10),
+    el: r,
+    rect: r.getBoundingClientRect()
+  }));
+
+  const sourceRow = rowEls.find(r => parseInt(r.dataset.habitIdx, 10) === idx);
+  if (sourceRow) sourceRow.classList.add('habit-row-source');
+  _habitDrag.rows.forEach(r => { if (r.idx !== idx) r.el.classList.add('habit-row-dimmed'); });
+
+  const overlay = document.createElement('div');
+  overlay.className = 'habit-drag-overlay';
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('show'));
+  _habitDrag.overlay = overlay;
+
+  const nameInput = sourceRow ? sourceRow.querySelector('.habit-name-input') : null;
+  const ghost = document.createElement('div');
+  ghost.className = 'habit-drag-ghost';
+  ghost.textContent = (nameInput && nameInput.value) || ('Habit ' + (idx + 1));
+  document.body.appendChild(ghost);
+  _habitDrag.ghost = ghost;
+  positionHabitGhost(_habitDrag.lastY);
+
+  const line = document.createElement('div');
+  line.className = 'habit-drag-insert-line';
+  tbody.style.position = 'relative';
+  tbody.appendChild(line);
+  _habitDrag.line = line;
+
+  if (navigator.vibrate) navigator.vibrate(15);
+}
+
+function positionHabitGhost(y) {
+  if (!_habitDrag || !_habitDrag.ghost) return;
+  _habitDrag.ghost.style.top = (y - 14) + 'px';
+  _habitDrag.ghost.style.left = '24px';
+}
+
+function habitDragMove(e) {
+  if (!_habitDrag) return;
+  _habitDrag.lastY = e.clientY;
+
+  if (!_habitDrag.dragging) {
+    if (Math.abs(e.clientY - _habitDrag.startY) > 12) {
+      clearTimeout(_habitDrag.timer);
+      cleanupHabitDrag();
+    }
+    return;
+  }
+
+  positionHabitGhost(e.clientY);
+  const { idx, lineTop } = findDragTargetIdx(e.clientY, _habitDrag.rows);
+  _habitDrag.targetIdx = idx;
+
+  if (_habitDrag.line) {
+    const tbodyRect = document.getElementById('habit-tbody').getBoundingClientRect();
+    _habitDrag.line.style.top = (lineTop - tbodyRect.top) + 'px';
+  }
+}
+
+function habitDragEnd() {
+  if (!_habitDrag) return;
+  clearTimeout(_habitDrag.timer);
+  const wasDragging = _habitDrag.dragging;
+  const fromIdx = _habitDrag.fromIdx;
+  const targetIdx = _habitDrag.targetIdx;
+  cleanupHabitDrag();
+  if (wasDragging && targetIdx !== fromIdx) {
+    reorderHabit(fromIdx, targetIdx);
+  }
+}
+
+function cleanupHabitDrag() {
+  if (!_habitDrag) return;
+  if (_habitDrag.ghost) _habitDrag.ghost.remove();
+  if (_habitDrag.overlay) _habitDrag.overlay.remove();
+  if (_habitDrag.line) _habitDrag.line.remove();
+  if (_habitDrag.rows) _habitDrag.rows.forEach(r => r.el.classList.remove('habit-row-dimmed'));
+  const tbody = document.getElementById('habit-tbody');
+  if (tbody) {
+    const sourceRow = tbody.querySelector('tr.habit-row-source');
+    if (sourceRow) sourceRow.classList.remove('habit-row-source');
+  }
+  document.removeEventListener('pointermove', habitDragMove);
+  document.removeEventListener('pointerup', habitDragEnd);
+  document.removeEventListener('pointercancel', habitDragEnd);
+  _habitDrag = null;
+}
+
 function peekHabitNames(year, month) {
   const k = habitKey(year, month);
   const arr = (habitData.habitsByMonth && habitData.habitsByMonth[k]) || null;
@@ -3792,10 +4036,18 @@ function renderHabitTracker() {
   const showUpTo = Math.min(Math.max(lastFilled + 2, 5), totalSlots); // min 5 visible
 
   for (let h = 0; h < showUpTo; h++) {
-    bodyHtml += '<tr>';
+    const isPriority = isHabitPriority(habitYear, habitMonth, h);
+    bodyHtml += `<tr data-habit-idx="${h}">`;
     // Habit name cell
     bodyHtml += `<td class="habit-name-cell">
-      <div style="display:flex;align-items:center;gap:4px">
+      <div style="display:flex;align-items:center;gap:2px">
+        <button class="habit-drag-handle" title="Hold to reorder" onpointerdown="habitDragStart(event, ${h})">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="5" r="1.4"/><circle cx="6" cy="12" r="1.4"/><circle cx="6" cy="19" r="1.4"/><circle cx="13" cy="5" r="1.4"/><circle cx="13" cy="12" r="1.4"/><circle cx="13" cy="19" r="1.4"/></svg>
+        </button>
+        <button title="${isPriority ? 'Priority habit (counts double)' : 'Mark as priority'}" onclick="toggleHabitPriority(${h})"
+                style="background:none;border:none;cursor:pointer;padding:2px 3px;line-height:1;flex-shrink:0">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="${isPriority ? 'var(--yellow)' : 'none'}" stroke="${isPriority ? 'var(--yellow)' : 'var(--text3)'}" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </button>
         <input class="habit-name-input" 
                placeholder="Habit ${h+1}..."
                value="${escHtml(habits[h] || '')}"
@@ -3971,11 +4223,14 @@ function calcWeeklyPct(year, month, refDay, activeIdx, log) {
   const ref = new Date(year, month, refDay);
   const mon = mondayOf(ref);
   let possible = 0, done = 0;
+  const weights = activeIdx.map(h => getHabitWeight(year, month, h));
   for (let i = 0; i < 7; i++) {
     const wd = new Date(mon); wd.setDate(mon.getDate() + i);
     if (wd.getFullYear() === year && wd.getMonth() === month && wd.getDate() <= refDay) {
-      possible += activeIdx.length;
-      activeIdx.forEach(h => { if (log[`${wd.getDate()}-${h}`]) done++; });
+      activeIdx.forEach((h, hi) => {
+        possible += weights[hi];
+        if (log[`${wd.getDate()}-${h}`]) done += weights[hi];
+      });
     }
   }
   return possible > 0 ? Math.round((done / possible) * 100) : 0;
@@ -4033,14 +4288,17 @@ function renderMonthlyReviewBody(year, month) {
   const k = habitKey(year, month);
   const log = (habitData.log && habitData.log[k]) || {};
 
-  let totalDone = 0, bestDay = 0, bestDayCount = 0;
+  let totalDone = 0, totalPossible = 0, bestDay = 0, bestDayCount = 0;
   const perHabitDone = {}; activeIdx.forEach(h => perHabitDone[h] = 0);
+  const weights = {}; activeIdx.forEach(h => weights[h] = getHabitWeight(year, month, h));
   for (let d = 1; d <= dim; d++) {
     let count = 0;
-    activeIdx.forEach(h => { if (log[`${d}-${h}`]) { count++; totalDone++; perHabitDone[h]++; } });
+    activeIdx.forEach(h => {
+      totalPossible += weights[h];
+      if (log[`${d}-${h}`]) { count++; totalDone += weights[h]; perHabitDone[h]++; }
+    });
     if (count > bestDayCount) { bestDayCount = count; bestDay = d; }
   }
-  const totalPossible = dim * activeIdx.length;
   const pct = totalPossible > 0 ? Math.round((totalDone / totalPossible) * 100) : 0;
 
   let bestHabitIdx = -1, bestHabitPct = -1;
@@ -4060,9 +4318,14 @@ function renderMonthlyReviewBody(year, month) {
     const prevActiveIdx = prevNames.map((h, i) => (h && h.trim()) ? i : -1).filter(i => i >= 0);
     const prevDim = daysInMonth(prevYear, prevMonth);
     const prevLog = (habitData.log && habitData.log[prevK]) || {};
-    let prevDone = 0;
-    for (let d = 1; d <= prevDim; d++) { prevActiveIdx.forEach(h => { if (prevLog[`${d}-${h}`]) prevDone++; }); }
-    const prevPossible = prevDim * prevActiveIdx.length;
+    let prevDone = 0, prevPossible = 0;
+    const prevWeights = {}; prevActiveIdx.forEach(h => prevWeights[h] = getHabitWeight(prevYear, prevMonth, h));
+    for (let d = 1; d <= prevDim; d++) {
+      prevActiveIdx.forEach(h => {
+        prevPossible += prevWeights[h];
+        if (prevLog[`${d}-${h}`]) prevDone += prevWeights[h];
+      });
+    }
     const prevPct = prevPossible > 0 ? Math.round((prevDone / prevPossible) * 100) : 0;
     const diff = pct - prevPct;
     const up = diff >= 0;
@@ -4166,12 +4429,15 @@ function renderDaySummary() {
     return;
   }
 
-  let done = 0;
+  let done = 0, doneWeight = 0, totalWeight = 0;
   todayHabits.forEach((h, i) => {
-    if (h.trim() && log[`${todayDay}-${i}`]) done++;
+    if (!h.trim()) return;
+    const w = getHabitWeight(today.getFullYear(), today.getMonth(), i);
+    totalWeight += w;
+    if (log[`${todayDay}-${i}`]) { done++; doneWeight += w; }
   });
 
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const pct = totalWeight > 0 ? Math.round((doneWeight / totalWeight) * 100) : 0;
   document.getElementById('summary-pct').textContent = pct + '%';
   document.getElementById('summary-title').textContent = `Today: ${done} of ${total} habits`;
 
